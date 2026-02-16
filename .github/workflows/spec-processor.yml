@@ -1,0 +1,113 @@
+name: Swarm Spec Processor
+
+on:
+  push:
+    paths:
+      - 'specs/**/*.md'
+  workflow_dispatch:
+    inputs:
+      spec_file:
+        description: 'Spec file to process'
+        required: true
+        type: string
+
+jobs:
+  process-spec:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Get changed spec files
+        id: changed-specs
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "specs=${{ github.event.inputs.spec_file }}" >> $GITHUB_OUTPUT
+          else
+            # Get the list of changed spec files
+            CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^specs/.*\.md$' || true)
+            echo "specs<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Process each spec file
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for spec_file in ${{ steps.changed-specs.outputs.specs }}; do
+            if [[ -f "$spec_file" ]]; then
+              echo "Processing spec: $spec_file"
+              
+              # Extract spec title and create issue
+              SPEC_TITLE=$(head -1 "$spec_file" | sed 's/^# //')
+              SPEC_CONTENT=$(cat "$spec_file")
+              
+              # Create GitHub issue for the spec
+              gh issue create \
+                --title "BUILD: $SPEC_TITLE" \
+                --body "## Automated Build Request
+
+**Spec File:** \`$spec_file\`
+
+**Status:** 🟡 Queued for Processing
+
+---
+
+$SPEC_CONTENT
+
+---
+
+**Build Pipeline:**
+- [ ] Architecture Review
+- [ ] Development 
+- [ ] Testing
+- [ ] Code Review
+- [ ] Deployment
+
+**Assigned Agents:**
+- Architect: TBD
+- Developer: TBD
+- Tester: TBD
+
+This issue was created automatically by the Swarm Spec Processor." \
+                --label "swarm-build,automated,queued"
+                
+              echo "✅ Created issue for: $SPEC_TITLE"
+              
+              # Move spec to builds folder to track processing
+              mkdir -p "builds/$(dirname "$spec_file")"
+              cp "$spec_file" "builds/$spec_file"
+              
+            fi
+          done
+          
+      - name: Commit build tracking
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "Swarm Processor"
+          
+          if [[ -n "$(git status --porcelain builds/)" ]]; then
+            git add builds/
+            git commit -m "🤖 Track specs in build pipeline"
+            git push
+          fi
+
+  notify-completion:
+    needs: process-spec
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Notification
+        run: |
+          echo "Swarm spec processing completed"
+          echo "Status: ${{ needs.process-spec.result }}"
